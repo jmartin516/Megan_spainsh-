@@ -6,7 +6,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: jmartin516/megan_spainsh- # Manual lowercase to avoid tag errors
+  IMAGE_NAME: jmartin516/megan_spainsh # Removed trailing hyphen to fix 'invalid reference format'
 
 jobs:
   build:
