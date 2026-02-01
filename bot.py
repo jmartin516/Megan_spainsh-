@@ -1,9 +1,15 @@
 import os
+import re
 import logging
-from typing import Dict
+import time
+import io
+import json
+from datetime import time as dt_time
+import pytz
+from typing import Dict, List, Set
 from dotenv import load_dotenv
 
-import google.generativeai as genai
+from openai import OpenAI
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,7 +23,8 @@ from telegram.ext import (
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Madrid")
 
 # Configure logging
 logging.basicConfig(
@@ -25,120 +32,210 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+# Initialize OpenAI Client
+if not OPENAI_API_KEY:
+    logger.error("OPENAI_API_KEY is not set! Check your .env file.")
 
-SYSTEM_INSTRUCTION = (
-    "Eres Juan, un simpático y divertido profesor de español de España. "
-    "Tu objetivo es ayudar a Megan a mejorar su español (Castellano). "
-    "Sigue estas reglas estrictamente:\n"
-    "1. Corrige suavemente cualquier error gramatical o de vocabulario que cometa Megan antes de responder.\n"
-    "2. Propón nuevos temas de conversación de forma natural si la charla se detiene.\n"
-    "3. IMPORTANTE: En cada mensaje, primero escribe tu respuesta en ESPAÑOL. Justo debajo, escribe la TRADUCCIÓN al INGLÉS en cursiva.\n"
-    "4. Usa Markdown para que la traducción al inglés esté en cursiva (ej: *Hello, how are you?*).\n"
-    "5. Usa un tono cercano, motivador y divertido, típico de un profesor de España que tiene mucha confianza con su alumna."
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Persistence for users
+USERS_FILE = "users.json"
+
+def load_users() -> Set[int]:
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
+
+def save_user(user_id: int):
+    users = load_users()
+    if user_id not in users:
+        users.add(user_id)
+        with open(USERS_FILE, "w") as f:
+            json.dump(list(users), f)
+
+def strip_emojis(text: str) -> str:
+    """Remove emojis for cleaner TTS."""
+    return re.sub(r'[^\w\s,.!?¿¡áéíóúÁÉÍÓÚñÑ]', '', text)
+
+SYSTEM_PROMPT = (
+    "Eres Juanito, un niño de 10 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
+    "Tu misión es ayudar a tu amiga Megan a perfeccionar su español de España. "
+    "Sigue estas REGLAS DE ORO O TE LLEVARÁS UN TIRÓN DE OREJAS:\n"
+    "1. VOCABULARIO: Usa palabras de España: 'vale', 'guay', 'mola', 'tío', 'vosotros'. NUNCA uses 'ustedes'.\n"
+    "2. CORRECCIONES: Corrige CUALQUIER error de Megan. Sé estricto.\n"
+    "3. SÉ PROACTIVO: Termina SIEMPRE con una PREGUNTA divertida.\n"
+    "4. FORMATO OBLIGATORIO (NO TE SALTES NADA):\n"
+    "   [Tu respuesta en español madrileño terminando en PREGUNTA]\n"
+    "   ```\n"
+    "   [Full English translation of EVERYTHING above, including corrections and the question]\n"
+    "   ```\n"
+    "   --- \n"
+    "   💡 Ideas para responder:\n"
+    "   - [Idea 1 en español] ([English translation 1])\n"
+    "   - [Idea 2 en español] ([English translation 2])\n"
+    "5. LAS IDEAS PARA RESPONDER SON OBLIGATORIAS en cada mensaje."
 )
 
-# Initialize the model
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash",
-    system_instruction=SYSTEM_INSTRUCTION,
-)
-
-import time
-
-# dictionary to store chat sessions per user
-chat_sessions: Dict[int, any] = {}
+# Global stores
+chat_histories: Dict[int, List[dict]] = {}
 last_interaction: Dict[int, float] = {}
 SESSION_TIMEOUT = 1800  # 30 minutes in seconds
 
-def get_chat_session(user_id: int):
-    """Retrieve or create a chat session for a user, checking for timeout."""
+def get_chat_history(user_id: int) -> List[dict]:
+    """Retrieve or create a chat history for a user, checking for timeout."""
     current_time = time.time()
     
     # Check for inactivity timeout
     if user_id in last_interaction:
         if current_time - last_interaction[user_id] > SESSION_TIMEOUT:
             logger.info(f"Session for user {user_id} timed out. Resetting.")
-            chat_sessions[user_id] = model.start_chat(history=[])
+            chat_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    if user_id not in chat_sessions:
-        chat_sessions[user_id] = model.start_chat(history=[])
+    if user_id not in chat_histories:
+        chat_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     last_interaction[user_id] = current_time
-    return chat_sessions[user_id]
+    return chat_histories[user_id]
 
-async def send_welcome(update: Update):
-    """Send the welcome message and clear session."""
+async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+    """Core logic to handle both text and voice transcriptions."""
     user_id = update.effective_user.id
-    chat_sessions[user_id] = model.start_chat(history=[])
+    save_user(user_id) # Ensure user is in our notification list
+
+    history = get_chat_history(user_id)
+    history.append({"role": "user", "content": user_text})
+    
+    try:
+        # Call OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=history,
+            temperature=0.8
+        )
+        
+        response_text = response.choices[0].message.content
+        history.append({"role": "assistant", "content": response_text})
+
+        # --- Send text first ---
+        await update.message.reply_text(response_text, parse_mode="Markdown")
+
+        # --- Generate and send Audio (OpenAI TTS) ---
+        first_line = response_text.split('\n')[0].strip()
+        spanish_for_tts = strip_emojis(first_line)
+
+        if spanish_for_tts:
+            try:
+                tts_response = client.audio.speech.create(
+                    model="tts-1",
+                    voice="echo",
+                    input=spanish_for_tts,
+                    speed=1.1
+                )
+                audio_file = io.BytesIO(tts_response.content)
+                audio_file.name = "voice.mp3"
+                await update.message.reply_voice(voice=audio_file)
+            except Exception as tts_e:
+                logger.error(f"TTS Error: {tts_e}")
+        
+    except Exception as e:
+        logger.error(f"OpenAI Error: {e}")
+        error_msg = "¡Uy! ¡Se me ha roto el juguete! 😅 ¿Puedes decírmelo otra vez?"
+        await update.message.reply_text(error_msg)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming text messages."""
+    user_text = update.message.text
+    if user_text == "🔄 Empezar nueva conversación":
+        await start(update, context)
+        return
+    await process_interaction(update, context, user_text)
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming voice messages using Whisper."""
+    user_id = update.effective_user.id
+    logger.info(f"Received voice message from {user_id}")
+    
+    try:
+        # Download the voice file
+        voice_file = await update.message.voice.get_file()
+        voice_data = await voice_file.download_as_bytearray()
+        
+        # Use Whisper to transcribe
+        # Whisper requires a file-like object with a proper name for format detection
+        audio_buffer = io.BytesIO(voice_data)
+        audio_buffer.name = "voice.ogg" # Telegram voice is usually OGG/Opus
+        
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1", 
+            file=audio_buffer
+        )
+        
+        transcribed_text = transcription.text
+        logger.info(f"Transcribed voice: {transcribed_text}")
+        
+        # Send a small confirmation text
+        await update.message.reply_text(f"🎤 _Juanito te ha escuchado:_ \"{transcribed_text}\"", parse_mode="Markdown")
+        
+        # Process as a normal message
+        await process_interaction(update, context, transcribed_text)
+        
+    except Exception as e:
+        logger.error(f"Whisper Error: {e}")
+        await update.message.reply_text("¡Uy! No te he oído bien, ¿puedes repetirlo? 👂")
+
+async def daily_word_job(context: ContextTypes.DEFAULT_TYPE):
+    """Send a Word of the Day to all users."""
+    users = load_users()
+    logger.info(f"Running daily job for {len(users)} users")
+    
+    for user_id in users:
+        try:
+            # Generate a "Word of the Day" using GPT-4o-mini
+            prompt = "Genera una 'Palabra del día' en español de España para un estudiante. Incluye la palabra, su significado sencillo, un ejemplo de uso madrileño y una pregunta corta para el estudiante. Responde en el formato de Juanito (niño de 10 años)."
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+            )
+            msg = f"🌅 ¡Buenos días! Es hora de aprender:\n\n{response.choices[0].message.content}"
+            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error in daily job for {user_id}: {e}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command."""
+    user_id = update.effective_user.id
+    save_user(user_id)
+    chat_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     last_interaction[user_id] = time.time()
     
     keyboard = [[KeyboardButton("🔄 Empezar nueva conversación")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     welcome_msg = (
-        "¡Hola Megan! Soy Juan, tu tutor personal de español. 🇪🇸\n\n"
-        "Estoy aquí para ayudarte a practicar y que hablemos de lo que tú quieras. "
-        "No te preocupes por los errores, ¡así es como se aprende! ¿Qué tal estás hoy?\n\n"
-        "*Hello Megan! I'm Juan, your personal Spanish tutor. I'm here to help you practice and we can talk about whatever you want. Don't worry about mistakes, that's how you learn! How are you today?*"
+        "¡Hola Megan! ¡Soy Juanito! 🧒🇪🇸\n\n"
+        "¡Vamos a jugar a hablar español! Puedes escribirme o **enviarme un audio**. ¿Qué has hecho hoy?\n\n"
+        "```\n"
+        "Hello Megan! I'm Juanito! Let's play speaking Spanish! You can write to me or send me a voice message. What have you done today?\n"
+        "```"
     )
     await update.message.reply_text(welcome_msg, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /start command."""
-    await send_welcome(update)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming text messages."""
-    user_id = update.effective_user.id
-    user_text = update.message.text
-    current_time = time.time()
-
-    # Check for the custom menu button
-    if user_text == "🔄 Empezar nueva conversación":
-        await send_welcome(update)
-        return
-
-    # Check for timeout before processing the message to maybe send a new welcome
-    is_new_session = False
-    if user_id in last_interaction:
-        if current_time - last_interaction[user_id] > SESSION_TIMEOUT:
-            is_new_session = True
-
-    chat = get_chat_session(user_id)
-    
-    try:
-        # Send message to Gemini
-        response = chat.send_message(user_text)
-        
-        # If it's a new session due to timeout, we could optionally prepend a "Welcome back" 
-        # but the user wanted it to "bore todo", so a fresh response is usually enough.
-        await update.message.reply_text(response.text, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Error calling Gemini API: {e}")
-        error_msg = (
-            "Lo siento, he tenido un pequeño problema técnico. 😅 "
-            "A veces la conexión se satura un poco. ¿Podrías intentar enviarlo de nuevo?\n\n"
-            "*Sorry, I had a little technical problem. Sometimes the connection gets a bit saturated. Could you try sending it again?*"
-        )
-        if "rate limit" in str(e).lower():
-            error_msg = (
-                "Vaya, parece que hemos hablado demasiado rápido. Espera unos segundos y vuelve a intentarlo. ⏳\n\n"
-                "*Oops, looks like we talked too fast. Wait a few seconds and try again.*"
-            )
-        
-        await update.message.reply_text(error_msg, parse_mode="Markdown")
-
 if __name__ == "__main__":
-    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
-        logger.error("Missing TELEGRAM_TOKEN or GEMINI_API_KEY environment variables.")
+    if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+        logger.error("Missing tokens!")
         exit(1)
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    logger.info("Bot is starting...")
+    # Scheduled for 9:00 AM daily in the configured timezone
+    tz = pytz.timezone(TIMEZONE)
+    app.job_queue.run_daily(daily_word_job, time=dt_time(hour=9, minute=0, second=0, tzinfo=tz))
+
+    logger.info(f"Bot is starting with Whisper and Daily Jobs (Timezone: {TIMEZONE})...")
     app.run_polling()
