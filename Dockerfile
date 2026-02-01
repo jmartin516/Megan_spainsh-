@@ -23,8 +23,8 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV TIMEZONE=Europe/Madrid
 
-# Create the users.json file if it doesn't exist to ensure persistence works
-RUN touch users.json
+# Create the data directory for persistence
+RUN mkdir -p data
 
 # Run the bot
 CMD ["python", "bot.py"]

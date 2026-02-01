@@ -39,12 +39,25 @@ if not OPENAI_API_KEY:
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Persistence for users
-USERS_FILE = "users.json"
+DATA_DIR = "data"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+
+def ensure_data_dir():
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+    # Ensure users.json exists
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w") as f:
+            json.dump([], f)
 
 def load_users() -> Set[int]:
+    ensure_data_dir()
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f:
-            return set(json.load(f))
+            try:
+                return set(json.load(f))
+            except json.JSONDecodeError:
+                return set()
     return set()
 
 def save_user(user_id: int):
