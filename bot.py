@@ -1,15 +1,24 @@
 import os
 import re
+import sys
 import logging
 import time
 import io
 import json
-from datetime import time as dt_time
+import tempfile
+from datetime import date, time as dt_time
 import pytz
 from typing import Dict, List, Set
 from dotenv import load_dotenv
 
+# XTTS (TTS) requires Python 3.10+ due to dependencies like 'bangla' (bool | None syntax)
+if sys.version_info < (3, 10):
+    print("This bot requires Python 3.10+ for XTTS. Current:", sys.version)
+    print("Create a venv with Python 3.10+: python3.10 -m venv venv && source venv/bin/activate")
+    sys.exit(1)
+
 from openai import OpenAI
+from TTS.api import TTS
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -24,7 +33,7 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TIMEZONE = os.getenv("TIMEZONE", "Europe/Madrid")
+TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")  # Seattle (Pacific)
 
 # Configure logging
 logging.basicConfig(
@@ -38,9 +47,24 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Persistence for users
+# Persistence for users and words of the day
 DATA_DIR = "data"
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
+WORDS_OF_THE_DAY_FILE = os.path.join(DATA_DIR, "words_of_the_day.json")
+_BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+SPEAKER_WAV = os.path.join(_BOT_DIR, "MI voz.wav") if os.path.exists(os.path.join(_BOT_DIR, "MI voz.wav")) else os.path.join(DATA_DIR, "speaker_voice.wav")
+
+_xtts_model = None
+
+def get_xtts():
+    """Load the XTTS model once (CPU or CUDA)."""
+    global _xtts_model
+    if _xtts_model is None:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Loading XTTS model on {device}...")
+        _xtts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+    return _xtts_model
 
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
@@ -48,6 +72,10 @@ def ensure_data_dir():
     # Ensure users.json exists
     if not os.path.exists(USERS_FILE):
         with open(USERS_FILE, "w") as f:
+            json.dump([], f)
+    # Ensure words_of_the_day.json exists
+    if not os.path.exists(WORDS_OF_THE_DAY_FILE):
+        with open(WORDS_OF_THE_DAY_FILE, "w") as f:
             json.dump([], f)
 
 def load_users() -> Set[int]:
@@ -67,12 +95,38 @@ def save_user(user_id: int):
         with open(USERS_FILE, "w") as f:
             json.dump(list(users), f)
 
+def load_used_words() -> List[str]:
+    """Load the list of words already sent as word of the day."""
+    ensure_data_dir()
+    if os.path.exists(WORDS_OF_THE_DAY_FILE):
+        with open(WORDS_OF_THE_DAY_FILE, "r") as f:
+            try:
+                data = json.load(f)
+                return [item["word"] for item in data] if isinstance(data, list) and data and isinstance(data[0], dict) else (data if isinstance(data, list) else [])
+            except (json.JSONDecodeError, KeyError):
+                return []
+    return []
+
+def save_word_of_the_day(word: str):
+    """Append the word of the day to the JSON so we don't repeat it."""
+    ensure_data_dir()
+    data = []
+    if os.path.exists(WORDS_OF_THE_DAY_FILE):
+        with open(WORDS_OF_THE_DAY_FILE, "r") as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                data = []
+    data.append({"word": word.strip(), "date": str(date.today())})
+    with open(WORDS_OF_THE_DAY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
 def strip_emojis(text: str) -> str:
     """Remove emojis for cleaner TTS."""
     return re.sub(r'[^\w\s,.!?¿¡áéíóúÁÉÍÓÚñÑ]', '', text)
 
 SYSTEM_PROMPT = (
-    "Eres Juanito, un niño de 10 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
+    "Eres Juan, un niño de 14 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
     "Tu misión es ayudar a tu amiga Megan a perfeccionar su español de España. "
     "Sigue estas REGLAS DE ORO O TE LLEVARÁS UN TIRÓN DE OREJAS:\n"
     "1. VOCABULARIO: Usa palabras de España: 'vale', 'guay', 'mola', 'tío', 'vosotros'. NUNCA uses 'ustedes'.\n"
@@ -133,23 +187,31 @@ async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE
         # --- Send text first ---
         await update.message.reply_text(response_text, parse_mode="Markdown")
 
-        # --- Generate and send Audio (OpenAI TTS) ---
+        # --- Generate and send Audio (XTTS - cloned voice from data/speaker_voice.wav or MI voz.wav) ---
         first_line = response_text.split('\n')[0].strip()
         spanish_for_tts = strip_emojis(first_line)
 
-        if spanish_for_tts:
+        if spanish_for_tts and os.path.exists(SPEAKER_WAV):
             try:
-                tts_response = client.audio.speech.create(
-                    model="tts-1",
-                    voice="echo",
-                    input=spanish_for_tts,
-                    speed=1.1
+                tts = get_xtts()
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp_path = tmp.name
+                tts.tts_to_file(
+                    text=spanish_for_tts,
+                    speaker_wav=SPEAKER_WAV,
+                    language="es",
+                    file_path=tmp_path,
                 )
-                audio_file = io.BytesIO(tts_response.content)
-                audio_file.name = "voice.mp3"
+                with open(tmp_path, "rb") as f:
+                    audio_file = io.BytesIO(f.read())
+                os.unlink(tmp_path)
+                audio_file.seek(0)
+                audio_file.name = "voice.wav"
                 await update.message.reply_voice(voice=audio_file)
             except Exception as tts_e:
                 logger.error(f"TTS Error: {tts_e}")
+        elif spanish_for_tts and not os.path.exists(SPEAKER_WAV):
+            logger.warning("data/speaker_voice.wav (or MI voz.wav) not found: add a short Spanish audio sample to clone the voice.")
         
     except Exception as e:
         logger.error(f"OpenAI Error: {e}")
@@ -197,23 +259,52 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Whisper Error: {e}")
         await update.message.reply_text("¡Uy! No te he oído bien, ¿puedes repetirlo? 👂")
 
+def _extract_word_from_response(content: str) -> str:
+    """Extract the word from the response (first line must be 'PALABRA: <word>')."""
+    first_line = content.split("\n")[0].strip()
+    if first_line.upper().startswith("PALABRA:"):
+        return first_line[8:].strip()  # after "PALABRA:"
+    # Fallback: take first word or first quoted thing
+    return first_line.split()[0] if first_line else ""
+
 async def daily_word_job(context: ContextTypes.DEFAULT_TYPE):
-    """Send a Word of the Day to all users."""
+    """Send a Word of the Day to all users. Words are saved in JSON so we don't repeat."""
     users = load_users()
     logger.info(f"Running daily job for {len(users)} users")
     
-    for user_id in users:
-        try:
-            # Generate a "Word of the Day" using GPT-4o-mini
-            prompt = "Genera una 'Palabra del día' en español de España para un estudiante. Incluye la palabra, su significado sencillo, un ejemplo de uso madrileño y una pregunta corta para el estudiante. Responde en el formato de Juanito (niño de 10 años)."
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
-            )
-            msg = f"🌅 ¡Buenos días! Es hora de aprender:\n\n{response.choices[0].message.content}"
-            await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Error in daily job for {user_id}: {e}")
+    used_words = load_used_words()
+    used_list = ", ".join(used_words[-50:]) if used_words else "(none yet)"
+    prompt = (
+        "Generate a 'Word of the day' in Spanish from Spain for a student. "
+        "Include the word, a simple meaning, a Madrid-style usage example, and a short question for the student. "
+        "Reply in Juanito's format (10-year-old kid).\n\n"
+        "IMPORTANT: Never repeat a word we have already used. Words already used: " + used_list + ".\n\n"
+        "Your response MUST start exactly with this line (then a blank line):\n"
+        "PALABRA: <the chosen word>\n"
+        "After that line, write the rest (meaning, example, question) in Juanito's style."
+    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+        )
+        content = response.choices[0].message.content
+        word = _extract_word_from_response(content)
+        if word:
+            save_word_of_the_day(word)
+            logger.info(f"Word of the day saved: {word}")
+        # Remove the "PALABRA: xxx" line from the message we send (optional, so user sees clean text)
+        lines = content.split("\n")
+        if lines and lines[0].upper().strip().startswith("PALABRA:"):
+            content = "\n".join(lines[1:]).strip()
+        msg = f"🌅 ¡Buenos días! Es hora de aprender:\n\n{content}"
+        for user_id in users:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Error in daily job for {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error generating word of the day: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /start command."""
@@ -226,10 +317,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     welcome_msg = (
-        "¡Hola Megan! ¡Soy Juanito! 🧒🇪🇸\n\n"
+        "¡Hola Megan! ¡Soy Juan! 🧒🇪🇸\n\n"
         "¡Vamos a jugar a hablar español! Puedes escribirme o **enviarme un audio**. ¿Qué has hecho hoy?\n\n"
         "```\n"
-        "Hello Megan! I'm Juanito! Let's play speaking Spanish! You can write to me or send me a voice message. What have you done today?\n"
+        "Hello Megan! I'm Juan! Let's play speaking Spanish! You can write to me or send me a voice message. What have you done today?\n"
         "```"
     )
     await update.message.reply_text(welcome_msg, reply_markup=reply_markup, parse_mode="Markdown")

@@ -2,3 +2,6 @@ python-telegram-bot[job-queue]
 openai
 python-dotenv
 pytz
+TTS
+torch
+torchaudio

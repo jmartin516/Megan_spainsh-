@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 # Set the working directory in the container
 WORKDIR /app
@@ -21,7 +21,7 @@ COPY . .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV TIMEZONE=Europe/Madrid
+ENV TIMEZONE=America/Los_Angeles
 
 # Create the data directory for persistence
 RUN mkdir -p data
