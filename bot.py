@@ -60,6 +60,8 @@ def get_xtts():
     """Load the XTTS model once (CPU or CUDA)."""
     global _xtts_model
     if _xtts_model is None:
+        # Accept Coqui CPML non-commercial terms so XTTS works in Docker/headless (no stdin)
+        os.environ["COQUI_TOS_AGREED"] = "1"
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Loading XTTS model on {device}...")
