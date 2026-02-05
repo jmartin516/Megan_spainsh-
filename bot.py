@@ -33,7 +33,9 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")  # Seattle (Pacific)
+TIMEZONE = (os.getenv("TIMEZONE") or "America/Los_Angeles").strip() or "America/Los_Angeles"
+# Name of the person learning Spanish (used in prompts and welcome message). Set in .env for your own use.
+STUDENT_NAME = (os.getenv("STUDENT_NAME") or "Megan").strip() or "Megan"
 
 # Configure logging
 logging.basicConfig(
@@ -126,39 +128,45 @@ def strip_emojis(text: str) -> str:
     """Remove emojis for cleaner TTS."""
     return re.sub(r'[^\w\s,.!?¿¡áéíóúÁÉÍÓÚñÑ]', '', text)
 
-def extract_ideas_block(text: str) -> str:
-    """Extract the 'Ideas para responder' section so we can send it as a separate message."""
-    if not text or "Ideas para responder" not in text and "💡" not in text:
-        return ""
-    # Find start: "---" or "💡 Ideas"
+def split_main_and_ideas(text: str):
+    """Split response into main part and 'Ideas para responder' block. Avoids sending ideas twice."""
+    if not text:
+        return text, ""
     start = text.find("💡")
     if start == -1:
         start = text.find("---")
     if start == -1:
         start = text.find("Ideas para responder")
     if start == -1:
-        return ""
-    block = text[start:].strip()
-    return block if len(block) > 10 else ""
+        return text, ""
+    ideas_block = text[start:].strip()
+    if len(ideas_block) <= 10:
+        return text, ""
+    main_text = text[:start].strip()
+    return main_text, ideas_block
 
-SYSTEM_PROMPT = (
-    "Eres Juan, un niño de 14 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
-    "Tu misión es ayudar a tu amiga Megan a perfeccionar su español de España. "
-    "Sigue estas REGLAS DE ORO O TE LLEVARÁS UN TIRÓN DE OREJAS:\n"
-    "1. VOCABULARIO: Usa palabras de España: 'vale', 'guay', 'mola', 'tío', 'vosotros'. NUNCA uses 'ustedes'.\n"
-    "2. CORRECCIONES: Corrige CUALQUIER error de Megan. Sé estricto.\n"
-    "3. SÉ PROACTIVO: Termina SIEMPRE con una PREGUNTA divertida.\n"
-    "4. FORMATO OBLIGATORIO (NO TE SALTES NADA):\n"
-    "   [Tu respuesta en español madrileño terminando en PREGUNTA]\n"
-    "   ```\n"
-    "   [Full English translation of EVERYTHING above, including corrections and the question]\n"
-    "   ```\n"
-    "   --- \n"
-    "   💡 Ideas para responder:\n"
-    "   - [Idea 1 en español] ([English translation 1])\n"
-    "   - [Idea 2 en español] ([English translation 2])\n"
-    "5. OBLIGATORIO: Incluye SIEMPRE la sección '💡 Ideas para responder' con al menos 2 ideas concretas (frases que Megan pueda decir para seguir la conversación). Sin excepción."
-)
+def _system_prompt():
+    return (
+        f"Eres Juan, un niño de 14 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
+        f"Tu misión es ayudar a tu amiga {STUDENT_NAME} a perfeccionar su español de España. "
+        "Sigue estas REGLAS DE ORO O TE LLEVARÁS UN TIRÓN DE OREJAS:\n"
+        "1. VOCABULARIO: Usa palabras de España: 'vale', 'guay', 'mola', 'tío', 'vosotros'. NUNCA uses 'ustedes'.\n"
+        f"2. CORRECCIONES: Corrige CUALQUIER error de {STUDENT_NAME}. Sé estricto.\n"
+        "3. SÉ PROACTIVO: Termina SIEMPRE con una PREGUNTA divertida.\n"
+        "4. FORMATO OBLIGATORIO (NO TE SALTES NADA):\n"
+        "   [Tu respuesta en español madrileño terminando en PREGUNTA]\n"
+        "   ```\n"
+        "   [Full English translation of EVERYTHING above, including corrections and the question]\n"
+        "   ```\n"
+        "   --- \n"
+        "   💡 Ideas para responder:\n"
+        "   - [Idea 1 en español] ([English translation 1])\n"
+        "   - [Idea 2 en español] ([English translation 2])\n"
+        f"5. OBLIGATORIO: Incluye SIEMPRE la sección '💡 Ideas para responder' con al menos 2 ideas concretas (frases que {STUDENT_NAME} pueda decir para seguir la conversación). Sin excepción."
+    )
+
+
+SYSTEM_PROMPT = _system_prompt()
 
 # Global stores
 chat_histories: Dict[int, List[dict]] = {}
@@ -200,11 +208,9 @@ async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE
         response_text = response.choices[0].message.content
         history.append({"role": "assistant", "content": response_text})
 
-        # --- Send text first ---
-        await update.message.reply_text(response_text, parse_mode="Markdown")
-
-        # --- Send ideas block as second message so the user always sees reply suggestions ---
-        ideas_block = extract_ideas_block(response_text)
+        # --- Send main reply first (without ideas block), then ideas as second message to avoid duplicate ---
+        main_text, ideas_block = split_main_and_ideas(response_text)
+        await update.message.reply_text(main_text, parse_mode="Markdown")
         if ideas_block:
             try:
                 await update.message.reply_text(ideas_block, parse_mode="Markdown")
@@ -341,10 +347,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     welcome_msg = (
-        "¡Hola Megan! ¡Soy Juan! 🧒🇪🇸\n\n"
+        f"¡Hola {STUDENT_NAME}! ¡Soy Juan! 🧒🇪🇸\n\n"
         "¡Vamos a jugar a hablar español! Puedes escribirme o **enviarme un audio**. ¿Qué has hecho hoy?\n\n"
         "```\n"
-        "Hello Megan! I'm Juan! Let's play speaking Spanish! You can write to me or send me a voice message. What have you done today?\n"
+        f"Hello {STUDENT_NAME}! I'm Juan! Let's play speaking Spanish! You can write to me or send me a voice message. What have you done today?\n"
         "```"
     )
     await update.message.reply_text(welcome_msg, reply_markup=reply_markup, parse_mode="Markdown")

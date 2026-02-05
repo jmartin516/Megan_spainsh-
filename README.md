@@ -48,15 +48,21 @@ pip install -r requirements.txt
 
 ### 2. Environment variables
 
-Create a `.env` file in the project root:
+Copy `.env.example` to `.env` and fill in your values:
+
+```bash
+cp .env.example .env
+```
 
 ```env
 TELEGRAM_TOKEN=your_telegram_bot_token
 OPENAI_API_KEY=your_openai_api_key
+STUDENT_NAME=Megan
 TIMEZONE=America/Los_Angeles
 ```
 
-`TIMEZONE` is optional; default is Seattle (Pacific). Use any [pytz](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) name (e.g. `Europe/Madrid`).
+- **STUDENT_NAME**: Name of the person learning Spanish (used in the welcome message and in Juan’s replies). Change it so anyone can use the bot for their own student.
+- **TIMEZONE**: Optional; default is Seattle (Pacific). Use any [pytz](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) name (e.g. `Europe/Madrid`).
 
 ### 3. Voice sample for XTTS
 
@@ -96,6 +102,7 @@ Mount `data/` so that `users.json` and `words_of_the_day.json` persist across re
 |------------------|----------|-------------|
 | `TELEGRAM_TOKEN` | Yes      | Bot token from BotFather |
 | `OPENAI_API_KEY`| Yes      | OpenAI API key (GPT + Whisper) |
+| `STUDENT_NAME`  | No       | Name of the person learning Spanish (welcome message and prompts). Default: `Megan` |
 | `TIMEZONE`      | No       | Timezone for daily “word of the day” (default: `America/Los_Angeles`) |
 
 ---
@@ -114,6 +121,4 @@ Mount `data/` so that `users.json` and `words_of_the_day.json` persist across re
 
 ---
 
-## License
-
-MIT (or your choice). Use and adapt as you like.
+f

@@ -3,6 +3,6 @@ openai
 python-dotenv
 pytz
 TTS
-torch
+torch<2.6
 torchaudio
 transformers>=4.33.0,<4.46
