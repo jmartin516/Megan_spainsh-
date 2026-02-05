@@ -36,6 +36,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TIMEZONE = (os.getenv("TIMEZONE") or "America/Los_Angeles").strip() or "America/Los_Angeles"
 # Name of the person learning Spanish (used in prompts and welcome message). Set in .env for your own use.
 STUDENT_NAME = (os.getenv("STUDENT_NAME") or "Megan").strip() or "Megan"
+# TTS speech rate: < 1.0 slower, > 1.0 faster. Default 0.9 (a bit slower for learners).
+try:
+    TTS_SPEED = float(os.getenv("TTS_SPEED", "0.9"))
+except ValueError:
+    TTS_SPEED = 0.9
+TTS_SPEED = max(0.5, min(2.0, TTS_SPEED))
 
 # Configure logging
 logging.basicConfig(
@@ -231,6 +237,7 @@ async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE
                     speaker_wav=SPEAKER_WAV,
                     language="es",
                     file_path=tmp_path,
+                    speed=TTS_SPEED,
                 )
                 with open(tmp_path, "rb") as f:
                     audio_file = io.BytesIO(f.read())

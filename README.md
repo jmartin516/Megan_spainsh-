@@ -103,6 +103,7 @@ Mount `data/` so that `users.json` and `words_of_the_day.json` persist across re
 | `TELEGRAM_TOKEN` | Yes      | Bot token from BotFather |
 | `OPENAI_API_KEY`| Yes      | OpenAI API key (GPT + Whisper) |
 | `STUDENT_NAME`  | No       | Name of the person learning Spanish (welcome message and prompts). Default: `Megan` |
+| `TTS_SPEED`     | No       | Speech rate for voice messages: `< 1` slower, `> 1` faster. Default: `0.9` |
 | `TIMEZONE`      | No       | Timezone for daily “word of the day” (default: `America/Los_Angeles`) |
 
 ---
