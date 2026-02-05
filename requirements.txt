@@ -5,3 +5,4 @@ pytz
 TTS
 torch
 torchaudio
+transformers>=4.33.0,<4.46

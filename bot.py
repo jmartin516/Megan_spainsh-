@@ -60,7 +60,6 @@ def get_xtts():
     """Load the XTTS model once (CPU or CUDA)."""
     global _xtts_model
     if _xtts_model is None:
-        # Accept Coqui CPML non-commercial terms so XTTS works in Docker/headless (no stdin)
         os.environ["COQUI_TOS_AGREED"] = "1"
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -127,6 +126,21 @@ def strip_emojis(text: str) -> str:
     """Remove emojis for cleaner TTS."""
     return re.sub(r'[^\w\s,.!?¿¡áéíóúÁÉÍÓÚñÑ]', '', text)
 
+def extract_ideas_block(text: str) -> str:
+    """Extract the 'Ideas para responder' section so we can send it as a separate message."""
+    if not text or "Ideas para responder" not in text and "💡" not in text:
+        return ""
+    # Find start: "---" or "💡 Ideas"
+    start = text.find("💡")
+    if start == -1:
+        start = text.find("---")
+    if start == -1:
+        start = text.find("Ideas para responder")
+    if start == -1:
+        return ""
+    block = text[start:].strip()
+    return block if len(block) > 10 else ""
+
 SYSTEM_PROMPT = (
     "Eres Juan, un niño de 14 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
     "Tu misión es ayudar a tu amiga Megan a perfeccionar su español de España. "
@@ -143,7 +157,7 @@ SYSTEM_PROMPT = (
     "   💡 Ideas para responder:\n"
     "   - [Idea 1 en español] ([English translation 1])\n"
     "   - [Idea 2 en español] ([English translation 2])\n"
-    "5. LAS IDEAS PARA RESPONDER SON OBLIGATORIAS en cada mensaje."
+    "5. OBLIGATORIO: Incluye SIEMPRE la sección '💡 Ideas para responder' con al menos 2 ideas concretas (frases que Megan pueda decir para seguir la conversación). Sin excepción."
 )
 
 # Global stores
@@ -188,6 +202,14 @@ async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # --- Send text first ---
         await update.message.reply_text(response_text, parse_mode="Markdown")
+
+        # --- Send ideas block as second message so the user always sees reply suggestions ---
+        ideas_block = extract_ideas_block(response_text)
+        if ideas_block:
+            try:
+                await update.message.reply_text(ideas_block, parse_mode="Markdown")
+            except Exception:
+                await update.message.reply_text(ideas_block)
 
         # --- Generate and send Audio (XTTS - cloned voice from data/speaker_voice.wav or MI voz.wav) ---
         first_line = response_text.split('\n')[0].strip()
