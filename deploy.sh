@@ -7,53 +7,37 @@ echo "🚀 Deploying Megan Spanish Bot..."
 
 # Check if .env exists
 if [ ! -f .env ]; then
-    echo "❌ .env file not found!"
-    echo "Please copy .env.example to .env and configure your tokens:"
-    echo "  cp .env.example .env"
-    exit 1
-fi
-
-# Check required env vars
-if ! grep -q "TELEGRAM_TOKEN=your_" .env && grep -q "TELEGRAM_TOKEN=" .env; then
-    echo "✅ TELEGRAM_TOKEN found"
-else
-    echo "❌ TELEGRAM_TOKEN not configured in .env"
-    exit 1
-fi
-
-if ! grep -q "OPENAI_API_KEY=your_" .env && grep -q "OPENAI_API_KEY=" .env; then
-    echo "✅ OPENAI_API_KEY found"
-else
-    echo "❌ OPENAI_API_KEY not configured in .env"
+    echo "❌ Error: .env file not found!"
+    echo "Please copy .env.example to .env and fill in your credentials."
     exit 1
 fi
 
 # Create data directory
 mkdir -p data
 
-# Check for voice file
-if [ -f "MI voz.wav" ]; then
-    echo "✅ Voice file found"
-else
-    echo "⚠️  Warning: MI voz.wav not found. Voice cloning will not work."
-    echo "   Add a Spanish voice sample (3-10 seconds, WAV format) to enable TTS."
-fi
-
-# Pull latest image and start
-echo "📦 Pulling latest image..."
+# Pull latest image
+echo "📥 Pulling latest image..."
 docker-compose pull
 
-echo "🚀 Starting services..."
+# Start services
+echo "▶️ Starting services..."
 docker-compose up -d
 
+# Wait for health check
+echo "⏳ Waiting for health check..."
+sleep 5
+
+# Check if running
+if docker-compose ps | grep -q "Up"; then
+    echo "✅ Bot is running!"
+    docker-compose logs --tail=20
+else
+    echo "❌ Something went wrong. Check logs:"
+    docker-compose logs
+    exit 1
+fi
+
 echo ""
-echo "✅ Bot deployed successfully!"
-echo ""
-echo "📊 Check status:"
-echo "  docker-compose ps"
-echo ""
-echo "📝 View logs:"
-echo "  docker-compose logs -f megan-spanish-bot"
-echo ""
-echo "🛑 Stop bot:"
-echo "  docker-compose down"
+echo "🎉 Deploy complete! The bot is now running."
+echo "📊 View logs: docker-compose logs -f"
+echo "🛑 Stop: docker-compose down"

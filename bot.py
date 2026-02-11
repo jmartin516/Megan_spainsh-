@@ -153,6 +153,131 @@ def split_main_and_ideas(text: str):
     main_text = text[:start].strip()
     return main_text, ideas_block
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERACTIVE GAME FEATURES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Game state storage
+game_sessions: Dict[int, dict] = {}
+
+# Conversation states
+MENU, QUIZ, ROLEPLAY, TOPIC_CHAT = range(4)
+
+# Quiz questions database (Spanish -> English)
+QUIZ_QUESTIONS = [
+    {"question": "¿Cómo se dice 'hello' en español?", "options": ["Hola", "Adiós", "Gracias", "Por favor"], "correct": 0},
+    {"question": "¿Qué significa 'gracias'?", "options": ["Please", "Thank you", "Sorry", "Goodbye"], "correct": 1},
+    {"question": "¿Cómo se dice 'good morning'?", "options": ["Buenas noches", "Buenos días", "Buenas tardes", "Hola"], "correct": 1},
+    {"question": "¿Qué significa 'perro'?", "options": ["Cat", "Dog", "Bird", "Fish"], "correct": 1},
+    {"question": "¿Cómo se dice 'water'?", "options": ["Vino", "Cerveza", "Agua", "Leche"], "correct": 2},
+    {"question": "¿Qué significa 'biblioteca'?", "options": ["Bookstore", "Library", "School", "Office"], "correct": 1},
+    {"question": "¿Cómo se dice 'I don't understand'?", "options": ["No sé", "No comprendo", "No quiero", "No puedo"], "correct": 1},
+    {"question": "¿Qué significa 'tengo hambre'?", "options": ["I'm thirsty", "I'm hungry", "I'm tired", "I'm happy"], "correct": 1},
+]
+
+# Roleplay scenarios
+ROLEPLAY_SCENARIOS = {
+    "restaurant": {
+        "name": "🍽️ En el Restaurante",
+        "description": "Eres cliente en un restaurante español. Pide comida, pregunta por el menú, paga la cuenta.",
+        "context": "You are at a restaurant in Madrid. You need to order food, ask about the menu, and pay. Be polite but friendly like a local."
+    },
+    "shopping": {
+        "name": "🛍️ De Compras",
+        "description": "Vas de compras por las tiendas de Madrid. Pregunta precios, tallas, colores.",
+        "context": "You are shopping in Madrid. Ask about prices, sizes, colors. Try to bargain a little - it's fun!"
+    },
+    "directions": {
+        "name": "🗺️ Pidiendo Direcciones",
+        "description": "Estás perdido en Madrid. Pide direcciones para llegar a la Puerta del Sol.",
+        "context": "You are lost in Madrid and need to get to Puerta del Sol. Ask for directions using local expressions."
+    },
+    "greetings": {
+        "name": "👋 Saludos y Presentaciones",
+        "description": "Conoces a un amigo de Juan en el parque. Preséntate y haz conversación.",
+        "context": "You meet Juan's friend at Retiro Park. Introduce yourself, talk about where you're from, your hobbies. Use 'tú' form."
+    }
+}
+
+TOPIC_PROMPTS = {
+    "comida": "Hablemos de COMIDA. ¿Cuál es tu comida favorita? ¿Has probado la paella o las tapas? ¡Cuéntame!",
+    "viajes": "Hablemos de VIAJES. ¿A qué lugares has ido? ¿Te gustaría visitar España? ¡Cuéntame tus aventuras!",
+    "familia": "Hablemos de FAMILIA. ¿Tienes hermanos? ¿Cómo es tu familia? ¡Cuéntame sobre ellos!",
+    "hobbies": "Hablemos de HOBBIES. ¿Qué te gusta hacer en tu tiempo libre? ¿Deportes, música, arte?",
+    "trabajo": "Hablemos de TU DÍA. ¿Qué hiciste hoy? ¿Qué planes tienes para mañana?"
+}
+
+def get_main_menu_keyboard():
+    """Return the main menu keyboard."""
+    keyboard = [
+        [KeyboardButton("💬 Modo Chat"), KeyboardButton("🎯 Quiz")],
+        [KeyboardButton("🎭 Roleplay"), KeyboardButton("📚 Tema del Día")],
+        [KeyboardButton("ℹ️ Ayuda"), KeyboardButton("🔄 Reiniciar")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_quiz_keyboard(question_idx: int):
+    """Return inline keyboard for quiz options."""
+    question = QUIZ_QUESTIONS[question_idx]
+    keyboard = []
+    for i, option in enumerate(question["options"]):
+        callback_data = f"quiz:{question_idx}:{i}:{question['correct']}"
+        keyboard.append([InlineKeyboardButton(option, callback_data=callback_data)])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_roleplay_keyboard():
+    """Return inline keyboard for roleplay scenarios."""
+    keyboard = []
+    for key, scenario in ROLEPLAY_SCENARIOS.items():
+        keyboard.append([InlineKeyboardButton(scenario["name"], callback_data=f"roleplay:{key}")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu:back")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_topic_keyboard():
+    """Return inline keyboard for topic selection."""
+    keyboard = [
+        [InlineKeyboardButton("🍽️ Comida", callback_data="topic:comida"),
+         InlineKeyboardButton("✈️ Viajes", callback_data="topic:viajes")],
+        [InlineKeyboardButton("👨‍👩‍👧‍👦 Familia", callback_data="topic:familia"),
+         InlineKeyboardButton("🎨 Hobbies", callback_data="topic:hobbies")],
+        [InlineKeyboardButton("📅 Mi Día", callback_data="topic:trabajo"),
+         InlineKeyboardButton("🔙 Volver", callback_data="menu:back")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def save_game_stats(user_id: int, correct: bool = False, points: int = 0):
+    """Save game statistics for a user."""
+    stats_file = os.path.join(DATA_DIR, f"stats_{user_id}.json")
+    stats = {"total_games": 0, "correct_answers": 0, "total_points": 0}
+    
+    if os.path.exists(stats_file):
+        with open(stats_file, "r") as f:
+            try:
+                stats = json.load(f)
+            except:
+                pass
+    
+    stats["total_games"] += 1
+    if correct:
+        stats["correct_answers"] += 1
+    stats["total_points"] += points
+    
+    with open(stats_file, "w") as f:
+        json.dump(stats, f, indent=2)
+    
+    return stats
+
+def load_game_stats(user_id: int) -> dict:
+    """Load game statistics for a user."""
+    stats_file = os.path.join(DATA_DIR, f"stats_{user_id}.json")
+    if os.path.exists(stats_file):
+        with open(stats_file, "r") as f:
+            try:
+                return json.load(f)
+            except:
+                pass
+    return {"total_games": 0, "correct_answers": 0, "total_points": 0}
+
 def _system_prompt():
     return (
         f"Eres Juan, un niño de 14 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "

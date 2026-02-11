@@ -180,4 +180,22 @@ docker-compose pull && docker-compose up -d
 
 ---
 
-f
+## 🚀 One-Command Deploy
+
+For the easiest deployment, use the included `deploy.sh` script:
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+This script will:
+1. Check your `.env` configuration
+2. Pull the latest Docker image
+3. Start all services
+4. Verify the bot is running
+5. Show you the logs
+
+---
+
+**Made with ❤️ for Megan**
