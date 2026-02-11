@@ -19,13 +19,15 @@ if sys.version_info < (3, 10):
 
 from openai import OpenAI
 from TTS.api import TTS
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
+    ConversationHandler,
 )
 
 # Load environment variables
@@ -151,6 +153,131 @@ def split_main_and_ideas(text: str):
     main_text = text[:start].strip()
     return main_text, ideas_block
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTERACTIVE GAME FEATURES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Game state storage
+game_sessions: Dict[int, dict] = {}
+
+# Conversation states
+MENU, QUIZ, ROLEPLAY, TOPIC_CHAT = range(4)
+
+# Quiz questions database (Spanish -> English)
+QUIZ_QUESTIONS = [
+    {"question": "¿Cómo se dice 'hello' en español?", "options": ["Hola", "Adiós", "Gracias", "Por favor"], "correct": 0},
+    {"question": "¿Qué significa 'gracias'?", "options": ["Please", "Thank you", "Sorry", "Goodbye"], "correct": 1},
+    {"question": "¿Cómo se dice 'good morning'?", "options": ["Buenas noches", "Buenos días", "Buenas tardes", "Hola"], "correct": 1},
+    {"question": "¿Qué significa 'perro'?", "options": ["Cat", "Dog", "Bird", "Fish"], "correct": 1},
+    {"question": "¿Cómo se dice 'water'?", "options": ["Vino", "Cerveza", "Agua", "Leche"], "correct": 2},
+    {"question": "¿Qué significa 'biblioteca'?", "options": ["Bookstore", "Library", "School", "Office"], "correct": 1},
+    {"question": "¿Cómo se dice 'I don't understand'?", "options": ["No sé", "No comprendo", "No quiero", "No puedo"], "correct": 1},
+    {"question": "¿Qué significa 'tengo hambre'?", "options": ["I'm thirsty", "I'm hungry", "I'm tired", "I'm happy"], "correct": 1},
+]
+
+# Roleplay scenarios
+ROLEPLAY_SCENARIOS = {
+    "restaurant": {
+        "name": "🍽️ En el Restaurante",
+        "description": "Eres cliente en un restaurante español. Pide comida, pregunta por el menú, paga la cuenta.",
+        "context": "You are at a restaurant in Madrid. You need to order food, ask about the menu, and pay. Be polite but friendly like a local."
+    },
+    "shopping": {
+        "name": "🛍️ De Compras",
+        "description": "Vas de compras por las tiendas de Madrid. Pregunta precios, tallas, colores.",
+        "context": "You are shopping in Madrid. Ask about prices, sizes, colors. Try to bargain a little - it's fun!"
+    },
+    "directions": {
+        "name": "🗺️ Pidiendo Direcciones",
+        "description": "Estás perdido en Madrid. Pide direcciones para llegar a la Puerta del Sol.",
+        "context": "You are lost in Madrid and need to get to Puerta del Sol. Ask for directions using local expressions."
+    },
+    "greetings": {
+        "name": "👋 Saludos y Presentaciones",
+        "description": "Conoces a un amigo de Juan en el parque. Preséntate y haz conversación.",
+        "context": "You meet Juan's friend at Retiro Park. Introduce yourself, talk about where you're from, your hobbies. Use 'tú' form."
+    }
+}
+
+TOPIC_PROMPTS = {
+    "comida": "Hablemos de COMIDA. ¿Cuál es tu comida favorita? ¿Has probado la paella o las tapas? ¡Cuéntame!",
+    "viajes": "Hablemos de VIAJES. ¿A qué lugares has ido? ¿Te gustaría visitar España? ¡Cuéntame tus aventuras!",
+    "familia": "Hablemos de FAMILIA. ¿Tienes hermanos? ¿Cómo es tu familia? ¡Cuéntame sobre ellos!",
+    "hobbies": "Hablemos de HOBBIES. ¿Qué te gusta hacer en tu tiempo libre? ¿Deportes, música, arte?",
+    "trabajo": "Hablemos de TU DÍA. ¿Qué hiciste hoy? ¿Qué planes tienes para mañana?"
+}
+
+def get_main_menu_keyboard():
+    """Return the main menu keyboard."""
+    keyboard = [
+        [KeyboardButton("💬 Modo Chat"), KeyboardButton("🎯 Quiz")],
+        [KeyboardButton("🎭 Roleplay"), KeyboardButton("📚 Tema del Día")],
+        [KeyboardButton("ℹ️ Ayuda"), KeyboardButton("🔄 Reiniciar")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_quiz_keyboard(question_idx: int):
+    """Return inline keyboard for quiz options."""
+    question = QUIZ_QUESTIONS[question_idx]
+    keyboard = []
+    for i, option in enumerate(question["options"]):
+        callback_data = f"quiz:{question_idx}:{i}:{question['correct']}"
+        keyboard.append([InlineKeyboardButton(option, callback_data=callback_data)])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_roleplay_keyboard():
+    """Return inline keyboard for roleplay scenarios."""
+    keyboard = []
+    for key, scenario in ROLEPLAY_SCENARIOS.items():
+        keyboard.append([InlineKeyboardButton(scenario["name"], callback_data=f"roleplay:{key}")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu:back")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_topic_keyboard():
+    """Return inline keyboard for topic selection."""
+    keyboard = [
+        [InlineKeyboardButton("🍽️ Comida", callback_data="topic:comida"),
+         InlineKeyboardButton("✈️ Viajes", callback_data="topic:viajes")],
+        [InlineKeyboardButton("👨‍👩‍👧‍👦 Familia", callback_data="topic:familia"),
+         InlineKeyboardButton("🎨 Hobbies", callback_data="topic:hobbies")],
+        [InlineKeyboardButton("📅 Mi Día", callback_data="topic:trabajo"),
+         InlineKeyboardButton("🔙 Volver", callback_data="menu:back")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def save_game_stats(user_id: int, correct: bool = False, points: int = 0):
+    """Save game statistics for a user."""
+    stats_file = os.path.join(DATA_DIR, f"stats_{user_id}.json")
+    stats = {"total_games": 0, "correct_answers": 0, "total_points": 0}
+    
+    if os.path.exists(stats_file):
+        with open(stats_file, "r") as f:
+            try:
+                stats = json.load(f)
+            except:
+                pass
+    
+    stats["total_games"] += 1
+    if correct:
+        stats["correct_answers"] += 1
+    stats["total_points"] += points
+    
+    with open(stats_file, "w") as f:
+        json.dump(stats, f, indent=2)
+    
+    return stats
+
+def load_game_stats(user_id: int) -> dict:
+    """Load game statistics for a user."""
+    stats_file = os.path.join(DATA_DIR, f"stats_{user_id}.json")
+    if os.path.exists(stats_file):
+        with open(stats_file, "r") as f:
+            try:
+                return json.load(f)
+            except:
+                pass
+    return {"total_games": 0, "correct_answers": 0, "total_points": 0}
+
 def _system_prompt():
     return (
         f"Eres Juan, un niño de 14 años de MADRID, ESPAÑA. Hablas con un marcado acento CASTELLANO. "
@@ -177,7 +304,31 @@ SYSTEM_PROMPT = _system_prompt()
 # Global stores
 chat_histories: Dict[int, List[dict]] = {}
 last_interaction: Dict[int, float] = {}
+user_scores: Dict[int, dict] = {}  # New: Gamification scores
+user_modes: Dict[int, str] = {}    # New: Current mode per user
 SESSION_TIMEOUT = 1800  # 30 minutes in seconds
+
+# Conversation states
+MENU, QUIZ, CONVERSATION, GAME_GUESS, PRACTICE = range(5)
+
+# Topic options for guided practice
+TOPICS = {
+    "comida": "🍽️ Comida y restaurantes",
+    "viajes": "✈️ Viajes y vacaciones", 
+    "familia": "👨‍👩‍👧‍👦 Familia y amigos",
+    "trabajo": "💼 Trabajo y estudios",
+    "tiempo": "🌤️ El tiempo y actividades",
+    "compras": "🛍️ Compras y dinero"
+}
+
+# Game modes description
+GAME_MODES = {
+    "conversation": "💬 Conversación libre",
+    "quiz": "🎯 Modo Quiz",
+    "guess": "🎮 Adivina la palabra",
+    "practice": "📚 Practicar tema",
+    "word": "📖 Palabra del día"
+}
 
 def get_chat_history(user_id: int) -> List[dict]:
     """Retrieve or create a chat history for a user, checking for timeout."""
@@ -194,6 +345,60 @@ def get_chat_history(user_id: int) -> List[dict]:
     
     last_interaction[user_id] = current_time
     return chat_histories[user_id]
+
+
+def get_user_score(user_id: int) -> dict:
+    """Get or initialize user score for gamification."""
+    if user_id not in user_scores:
+        user_scores[user_id] = {
+            "points": 0,
+            "streak": 0,
+            "quizzes_completed": 0,
+            "correct_answers": 0,
+            "words_learned": 0,
+            "last_active": date.today().isoformat()
+    }
+    return user_scores[user_id]
+
+
+def add_points(user_id: int, points: int, reason: str = ""):
+    """Add points to user's score."""
+    score = get_user_score(user_id)
+    score["points"] += points
+    logger.info(f"User {user_id} earned {points} points ({reason}). Total: {score['points']}")
+    return score["points"]
+
+
+def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Create the main menu keyboard with buttons."""
+    keyboard = [
+        [KeyboardButton("💬 Conversación libre"), KeyboardButton("🎯 Modo Quiz")],
+        [KeyboardButton("🎮 Adivina la palabra"), KeyboardButton("📚 Practicar tema")],
+        [KeyboardButton("📖 Palabra del día"), KeyboardButton("🏆 Mi puntuación")],
+        [KeyboardButton("🔄 Empezar nueva conversación")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="¿Qué quieres practicar?")
+
+
+def get_topics_keyboard() -> InlineKeyboardMarkup:
+    """Create inline keyboard for topic selection."""
+    keyboard = []
+    for key, label in TOPICS.items():
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"topic:{key}")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver al menú", callback_data="menu:back")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_game_modes_keyboard() -> InlineKeyboardMarkup:
+    """Create inline keyboard for game mode selection."""
+    keyboard = [
+        [InlineKeyboardButton("💬 Conversación libre", callback_data="mode:conversation")],
+        [InlineKeyboardButton("🎯 Modo Quiz", callback_data="mode:quiz")],
+        [InlineKeyboardButton("🎮 Adivina la palabra", callback_data="mode:guess")],
+        [InlineKeyboardButton("📚 Practicar tema", callback_data="mode:practice")],
+        [InlineKeyboardButton("📖 Palabra del día", callback_data="mode:word")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
     """Core logic to handle both text and voice transcriptions."""
@@ -255,12 +460,460 @@ async def process_interaction(update: Update, context: ContextTypes.DEFAULT_TYPE
         error_msg = "¡Uy! ¡Se me ha roto el juguete! 😅 ¿Puedes decírmelo otra vez?"
         await update.message.reply_text(error_msg)
 
+async def show_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's current score and stats."""
+    user_id = update.effective_user.id
+    score = get_user_score(user_id)
+    
+    score_msg = (
+        f"🏆 *Tu puntuación, {STUDENT_NAME}*\n\n"
+        f"⭐ Puntos totales: *{score['points']}*\n"
+        f"🔥 Racha actual: *{score['streak']}* días\n"
+        f"🎯 Quizzes completados: *{score['quizzes_completed']}*\n"
+        f"✅ Respuestas correctas: *{score['correct_answers']}*\n"
+        f"📖 Palabras aprendidas: *{score['words_learned']}*\n\n"
+        "¡Sigue practicando para ganar más puntos! 💪"
+    )
+    await update.message.reply_text(score_msg, parse_mode="Markdown")
+
+
+async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start a quiz mode with multiple choice questions."""
+    user_id = update.effective_user.id
+    user_modes[user_id] = "quiz"
+    
+    # Generate a quiz question using GPT
+    prompt = (
+        "Generate a Spanish language quiz question for a beginner/intermediate student. "
+        "Format your response EXACTLY like this:\n\n"
+        "PREGUNTA: [Question in Spanish]\n"
+        "A) [Option A]\n"
+        "B) [Option B]\n"
+        "C) [Option C]\n"
+        "D) [Option D]\n"
+        "CORRECTA: [A/B/C/D]\n"
+        "EXPLICACION: [Brief explanation in Spanish with English translation]"
+    )
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8
+        )
+        
+        quiz_text = response.choices[0].message.content
+        
+        # Parse the quiz
+        lines = quiz_text.strip().split('\n')
+        question = ""
+        options = {}
+        correct = ""
+        explanation = ""
+        
+        for line in lines:
+            if line.startswith("PREGUNTA:"):
+                question = line[9:].strip()
+            elif line.startswith("A)"):
+                options["A"] = line[2:].strip()
+            elif line.startswith("B)"):
+                options["B"] = line[2:].strip()
+            elif line.startswith("C)"):
+                options["C"] = line[2:].strip()
+            elif line.startswith("D)"):
+                options["D"] = line[2:].strip()
+            elif line.startswith("CORRECTA:"):
+                correct = line[9:].strip().upper()
+            elif line.startswith("EXPLICACION:"):
+                explanation = line[12:].strip()
+        
+        # Store quiz data in context
+        context.user_data['current_quiz'] = {
+            'question': question,
+            'options': options,
+            'correct': correct,
+            'explanation': explanation
+        }
+        
+        # Create inline keyboard with options
+        keyboard = [
+            [InlineKeyboardButton(f"A) {options['A']}", callback_data="quiz:A")],
+            [InlineKeyboardButton(f"B) {options['B']}", callback_data="quiz:B")],
+            [InlineKeyboardButton(f"C) {options['C']}", callback_data="quiz:C")],
+            [InlineKeyboardButton(f"D) {options['D']}", callback_data="quiz:D")]
+        ]
+        
+        await update.message.reply_text(
+            f"🎯 *Modo Quiz*\n\n{question}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Quiz generation error: {e}")
+        await update.message.reply_text(
+            "¡Ups! No pude crear el quiz. ¿Volvemos a intentarlo? 🎯",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle quiz answer callback."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    answer = query.data.split(":")[1]
+    quiz = context.user_data.get('current_quiz')
+    
+    if not quiz:
+        await query.edit_message_text("El quiz expiró. ¡Intentemos otro! 🎯")
+        return
+    
+    is_correct = answer == quiz['correct']
+    score = get_user_score(user_id)
+    score['quizzes_completed'] += 1
+    
+    if is_correct:
+        score['correct_answers'] += 1
+        points = add_points(user_id, 10, "Quiz correct answer")
+        result_emoji = "✅"
+        result_text = f"¡Correcto! ¡Muy bien, {STUDENT_NAME}! 🎉"
+    else:
+        points = add_points(user_id, 2, "Quiz attempt")
+        result_emoji = "❌"
+        result_text = f"¡Casi! La respuesta correcta era: *{quiz['correct']}) {quiz['options'][quiz['correct']]}*"
+    
+    response = (
+        f"{result_emoji} *{result_text}*\n\n"
+        f"💡 {quiz['explanation']}\n\n"
+        f"⭐ Puntos ganados: +{10 if is_correct else 2}\n"
+        f"🏆 Total: {points} puntos"
+    )
+    
+    # Add buttons for next action
+    keyboard = [
+        [InlineKeyboardButton("🎯 Otro quiz", callback_data="quiz:next")],
+        [InlineKeyboardButton("🔙 Menú principal", callback_data="menu:back")]
+    ]
+    
+    await query.edit_message_text(
+        response,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+
+async def start_guess_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the 'Guess the Word' game."""
+    user_id = update.effective_user.id
+    user_modes[user_id] = "guess"
+    
+    # Generate a word to guess
+    prompt = (
+        "Generate a simple Spanish word for a beginner to guess. "
+        "Provide a riddle/clue in Spanish. Format:\n\n"
+        "PALABRA: [The word]\n"
+        "PISTA: [A riddle/clue in Spanish describing the word]\n"
+        "FACIL: [An easier hint]\n"
+        "DIFICULTAD: [easy/medium/hard]"
+    )
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.9
+        )
+        
+        content = response.choices[0].message.content
+        lines = content.strip().split('\n')
+        
+        word = ""
+        clue = ""
+        easy_hint = ""
+        difficulty = "medium"
+        
+        for line in lines:
+            if line.startswith("PALABRA:"):
+                word = line[8:].strip().lower()
+            elif line.startswith("PISTA:"):
+                clue = line[6:].strip()
+            elif line.startswith("FACIL:"):
+                easy_hint = line[6:].strip()
+            elif line.startswith("DIFICULTAD:"):
+                difficulty = line[11:].strip()
+        
+        context.user_data['guess_word'] = {
+            'word': word,
+            'clue': clue,
+            'easy_hint': easy_hint,
+            'difficulty': difficulty,
+            'attempts': 0
+        }
+        
+        difficulty_emoji = {"easy": "🟢", "medium": "🟡", "hard": "🔴"}.get(difficulty, "🟡")
+        
+        await update.message.reply_text(
+            f"🎮 *¡Adivina la palabra!* {difficulty_emoji}\n\n"
+            f"🤔 *Pista:* {clue}\n\n"
+            f"Escribe la palabra en español. ¡Tienes 3 intentos!\n\n"
+            f"💡 Escribe 'pista' para una ayuda más fácil (pero ganarás menos puntos)",
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Guess game error: {e}")
+        await update.message.reply_text(
+            "¡Ups! No pude crear el juego. ¿Volvemos al menú? 🎮",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+async def handle_guess_attempt(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+    """Handle word guessing attempts."""
+    user_id = update.effective_user.id
+    guess_data = context.user_data.get('guess_word')
+    
+    if not guess_data:
+        await update.message.reply_text(
+            "No hay juego activo. ¡Empecemos uno nuevo! 🎮",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    user_text_lower = user_text.lower().strip()
+    
+    # Check if asking for hint
+    if user_text_lower == "pista":
+        await update.message.reply_text(
+            f"💡 *Pista fácil:* {guess_data['easy_hint']}\n\n"
+            f"(Usar pista = menos puntos)",
+            parse_mode="Markdown"
+        )
+        guess_data['used_hint'] = True
+        return
+    
+    guess_data['attempts'] += 1
+    correct_word = guess_data['word'].lower()
+    
+    # Check answer
+    if user_text_lower == correct_word:
+        # Correct!
+        base_points = {"easy": 15, "medium": 25, "hard": 40}.get(guess_data['difficulty'], 20)
+        if guess_data.get('used_hint'):
+            base_points = base_points // 2
+        
+        points = add_points(user_id, base_points, f"Guessed word in {guess_data['attempts']} attempts")
+        
+        await update.message.reply_text(
+            f"🎉 *¡Correcto!* ¡La palabra era: {guess_data['word'].upper()}!\n\n"
+            f"⭐ +{base_points} puntos\n"
+            f"🏆 Total: {points} puntos\n"
+            f"🎯 Intentos: {guess_data['attempts']}/3\n\n"
+            f"¡Muy bien, {STUDENT_NAME}!",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+        context.user_data.pop('guess_word', None)
+        user_modes[user_id] = "menu"
+        
+    elif guess_data['attempts'] >= 3:
+        # Game over
+        await update.message.reply_text(
+            f"😅 *¡Se acabaron los intentos!*\n\n"
+            f"La palabra era: *{guess_data['word'].upper()}*\n\n"
+            f"¡No pasa nada! Inténtalo de nuevo 🎮",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+        context.user_data.pop('guess_word', None)
+        user_modes[user_id] = "menu"
+        
+    else:
+        # Wrong but can try again
+        remaining = 3 - guess_data['attempts']
+        await update.message.reply_text(
+            f"❌ *No es correcto*\n\n"
+            f"Te quedan {remaining} intentos.\n"
+            f"💡 Escribe 'pista' si necesitas ayuda",
+            parse_mode="Markdown"
+        )
+
+
+async def show_topics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show topic selection for guided practice."""
+    await update.message.reply_text(
+        "📚 *Elige un tema para practicar:*\n\n"
+        "Selecciona uno y practicaremos vocabulario específico",
+        reply_markup=get_topics_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+async def handle_topic_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle topic selection callback."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    topic_key = query.data.split(":")[1]
+    topic_name = TOPICS.get(topic_key, topic_key)
+    
+    user_modes[user_id] = "practice"
+    
+    # Generate practice content for this topic
+    prompt = (
+        f"Create a vocabulary practice session about '{topic_key}' in Spanish. "
+        f"Give {STUDENT_NAME} 5 useful phrases/words in Spanish about this topic, "
+        "with their English translations. Then ask them to use one in a sentence. "
+        "Make it fun and encouraging, like a game!"
+    )
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8
+        )
+        
+        content = response.choices[0].message.content
+        
+        # Add buttons to continue or change topic
+        keyboard = [
+            [InlineKeyboardButton("🔄 Más vocabulario", callback_data=f"topic:{topic_key}")],
+            [InlineKeyboardButton("📚 Cambiar tema", callback_data="mode:practice")],
+            [InlineKeyboardButton("🔙 Menú principal", callback_data="menu:back")]
+        ]
+        
+        await query.edit_message_text(
+            f"📚 *{topic_name}*\n\n{content}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Topic practice error: {e}")
+        await query.edit_message_text(
+            "¡Ups! Error cargando el tema. ¿Intentamos otro? 📚",
+            reply_markup=get_topics_keyboard()
+        )
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all inline keyboard callbacks."""
+    query = update.callback_query
+    data = query.data
+    
+    if data.startswith("quiz:"):
+        if data == "quiz:next":
+            await start_quiz(update, context)
+        else:
+            await handle_quiz_answer(update, context)
+    
+    elif data.startswith("topic:"):
+        await handle_topic_selection(update, context)
+    
+    elif data.startswith("mode:"):
+        mode = data.split(":")[1]
+        if mode == "conversation":
+            await query.edit_message_text("💬 Modo conversación activado. ¡Hablemos!")
+            await start_conversation_mode(update, context)
+        elif mode == "quiz":
+            await start_quiz(update, context)
+        elif mode == "guess":
+            await start_guess_game(update, context)
+        elif mode == "practice":
+            await show_topics(update, context)
+        elif mode == "word":
+            await send_word_of_day_manual(update, context)
+    
+    elif data == "menu:back":
+        await query.edit_message_text("🔙 Volviendo al menú principal...")
+        await start(update, context)
+
+
+async def start_conversation_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start free conversation mode."""
+    user_id = update.effective_user.id
+    user_modes[user_id] = "conversation"
+    
+    # Get the effective message object
+    if update.callback_query:
+        message = update.callback_query.message
+    else:
+        message = update.message
+    
+    await message.reply_text(
+        f"💬 *Modo Conversación*\n\n"
+        f"¡Perfecto, {STUDENT_NAME}! Cuéntame algo... ¿qué has hecho hoy? "
+        f"¿Tienes algún plan? ¿Quieres practicar algo específico?\n\n"
+        f"Puedes escribirme o enviarme un audio 🎤",
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+async def send_word_of_day_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send word of the day on demand."""
+    # Use callback or message depending on source
+    if update.callback_query:
+        await daily_word_job(context)
+    else:
+        await daily_word_job(context)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming text messages."""
+    """Handle incoming text messages with mode routing."""
+    user_id = update.effective_user.id
     user_text = update.message.text
+    current_mode = user_modes.get(user_id, "menu")
+    
+    # Handle menu buttons first
     if user_text == "🔄 Empezar nueva conversación":
         await start(update, context)
         return
+    elif user_text == "🏆 Mi puntuación":
+        await show_score(update, context)
+        return
+    elif user_text == "💬 Conversación libre":
+        await start_conversation_mode(update, context)
+        return
+    elif user_text == "🎯 Modo Quiz":
+        await start_quiz(update, context)
+        return
+    elif user_text == "🎮 Adivina la palabra":
+        await start_guess_game(update, context)
+        return
+    elif user_text == "📚 Practicar tema":
+        await show_topics(update, context)
+        return
+    elif user_text == "📖 Palabra del día":
+        await daily_word_job(context)
+        return
+    
+    # Handle game modes
+    if current_mode == "guess":
+        await handle_guess_attempt(update, context, user_text)
+        return
+    elif current_mode == "quiz":
+        # In quiz mode, only callback buttons should respond
+        await update.message.reply_text(
+            "🎯 Estás en modo Quiz. Responde usando los botones de arriba 👆",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    # Default: conversation mode
     await process_interaction(update, context, user_text)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,23 +997,39 @@ async def daily_word_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error generating word of the day: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /start command."""
+    """Handle the /start command with interactive menu."""
     user_id = update.effective_user.id
     save_user(user_id)
     chat_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     last_interaction[user_id] = time.time()
+    user_modes[user_id] = "menu"
     
-    keyboard = [[KeyboardButton("🔄 Empezar nueva conversación")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    score = get_user_score(user_id)
     
     welcome_msg = (
         f"¡Hola {STUDENT_NAME}! ¡Soy Juan! 🧒🇪🇸\n\n"
-        "¡Vamos a jugar a hablar español! Puedes escribirme o **enviarme un audio**. ¿Qué has hecho hoy?\n\n"
+        "¡Vamos a jugar y aprender español juntos! Elige cómo quieres practicar hoy:\n\n"
+        "💬 *Conversación* - Hablamos de lo que quieras\n"
+        "🎯 *Modo Quiz* - Preguntas de opción múltiple\n"
+        "🎮 *Adivina* - Adivina la palabra secreta\n"
+        "📚 *Practicar tema* - Practica vocabulario específico\n"
+        "📖 *Palabra del día* - Aprende una palabra nueva\n\n"
+        f"🏆 *Tus puntos:* {score['points']} | 🔥 *Racha:* {score['streak']} días\n\n"
         "```\n"
-        f"Hello {STUDENT_NAME}! I'm Juan! Let's play speaking Spanish! You can write to me or send me a voice message. What have you done today?\n"
+        f"Hi {STUDENT_NAME}! I'm Juan! Let's play and learn Spanish together! Choose how you want to practice today:\n\n"
+        "💬 Conversation - Chat about anything\n"
+        "🎯 Quiz Mode - Multiple choice questions\n"
+        "🎮 Guess - Guess the secret word\n"
+        "📚 Practice topic - Practice specific vocabulary\n"
+        "📖 Word of the day - Learn a new word\n"
         "```"
     )
-    await update.message.reply_text(welcome_msg, reply_markup=reply_markup, parse_mode="Markdown")
+    
+    await update.message.reply_text(
+        welcome_msg, 
+        reply_markup=get_main_menu_keyboard(), 
+        parse_mode="Markdown"
+    )
 
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
@@ -371,6 +1040,7 @@ if __name__ == "__main__":
 
     # Handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
@@ -378,5 +1048,6 @@ if __name__ == "__main__":
     tz = pytz.timezone(TIMEZONE)
     app.job_queue.run_daily(daily_word_job, time=dt_time(hour=9, minute=0, second=0, tzinfo=tz))
 
-    logger.info(f"Bot is starting with Whisper and Daily Jobs (Timezone: {TIMEZONE})...")
+    logger.info(f"🚀 Bot starting with Interactive Modes (Timezone: {TIMEZONE})...")
+    logger.info(f"🎮 Available modes: {list(GAME_MODES.keys())}")
     app.run_polling()

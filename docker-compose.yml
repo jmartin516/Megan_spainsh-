@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  megan-spanish-bot:
+    build: .
+    image: ghcr.io/jmartin516/megan-spanish-bot:latest
+    container_name: megan-spanish-bot
+    restart: unless-stopped
+    
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - STUDENT_NAME=${STUDENT_NAME:-Megan}
+      - TIMEZONE=${TIMEZONE:-America/Los_Angeles}
+      - TTS_SPEED=${TTS_SPEED:-0.9}
+    
+    volumes:
+      - ./data:/app/data
+      - ./MI_voz.wav:/app/MI_voz.wav:ro
+    
+    # Resource limits for stability
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Optional: Watchtower for auto-updates
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower-megan
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=3600  # Check every hour
+      - WATCHTOWER_INCLUDE_STOPPED=true
+      - WATCHTOWER_REVIVE_STOPPED=true
+    command: megan-spanish-bot
