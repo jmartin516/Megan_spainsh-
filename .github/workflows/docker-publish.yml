@@ -1,4 +1,4 @@
-name: Docker Publish
+name: Docker Publish and Deploy
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: jmartin516/megan_spainsh # Removed trailing hyphen to fix 'invalid reference format'
+  IMAGE_NAME: jmartin516/megan_spanish_bot
 
 jobs:
   build:
@@ -39,3 +39,19 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to NAS via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.NAS_HOST }}
+          username: ${{ secrets.NAS_USER }}
+          password: ${{ secrets.NAS_PASSWORD }}
+          script: |
+            cd /path/to/megan-spanish-bot
+            docker-compose pull
+            docker-compose up -d
+            docker-compose ps
