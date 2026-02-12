@@ -51,7 +51,7 @@ jobs:
           username: ${{ secrets.NAS_USER }}
           password: ${{ secrets.NAS_PASSWORD }}
           script: |
-            cd /path/to/megan-spanish-bot
+            cd /Spanish-bot/juanito
             docker-compose pull
             docker-compose up -d
             docker-compose ps
